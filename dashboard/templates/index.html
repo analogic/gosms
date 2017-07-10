@@ -67,16 +67,16 @@
     </div>
     <div class="row">
         <div class="col-md-12">
-            <h4>SMS Logs</h4>
+            <h4>Sent SMS</h4>
             <div class="table-responsive">
                 <table class="table" id="smsdata">
                     <thead>
                     <tr>
+                        <th>ID</th>
+                        <th>updated</th>
                         <th>mobile</th>
                         <th>message</th>
                         <th>status</th>
-                        <th>created at</th>
-                        <th>last update</th>
                     </tr>
                     </thead>
                     <tbody></tbody>
@@ -84,6 +84,28 @@
             </div>
         </div>
     </div>
+
+    <br /><br />
+
+    <div class="row">
+        <div class="col-md-12">
+            <h4>Incomming SMS</h4>
+            <div class="table-responsive">
+                <table class="table" id="incoming">
+                    <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>received</th>
+                        <th>mobile</th>
+                        <th>message</th>
+                    </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
 </div>
 <div class="footer"></div>
 
@@ -94,7 +116,9 @@
 <script src="assets/js/jquery.flot.pie.min.js"></script>
 <script src="assets/js/jquery.flot.resize.min.js"></script>
 <script src="assets/js/moment.min.js"></script>
-<script src="assets/js/main.js"></script>
+
+<script src="assets/js/outgoing.js"></script>
+<script src="assets/js/incoming.js"></script>
 
 </body>
 </html>

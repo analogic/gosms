@@ -15,18 +15,25 @@ import (
 )
 
 //reposne structure to /sms
-type SMSResponse struct {
+type OutgoingSMSResponse struct {
 	Status  int    `json:"status"`
 	Message string `json:"message"`
 }
 
-//response structure to /smsdata/
-type SMSDataResponse struct {
+//response structure to /log/
+type OutgoingSMSDataResponse struct {
 	Status   int            `json:"status"`
 	Message  string         `json:"message"`
 	Summary  []int          `json:"summary"`
 	DayCount map[string]int `json:"daycount"`
-	Messages []gosms.SMS    `json:"messages"`
+	Messages []gosms.OutgoingSMS    `json:"messages"`
+}
+
+//response structure to /incoming/
+type IncomingSMSDataResponse struct {
+	Status   int            `json:"status"`
+	Message  string         `json:"message"`
+	Messages []gosms.IncomingSMS    `json:"messages"`
 }
 
 // Cache templates
@@ -68,11 +75,11 @@ func sendSMSHandler(w http.ResponseWriter, r *http.Request) {
 	r.ParseForm()
 	mobile := r.FormValue("mobile")
 	message := r.FormValue("message")
-	uuid := uuid.NewV1()
-	sms := &gosms.SMS{UUID: uuid.String(), Mobile: mobile, Body: message, Retries: 0}
-	gosms.EnqueueMessage(sms, true)
+	newUuid := uuid.NewV1()
+	sms := &gosms.OutgoingSMS{UUID: newUuid.String(), Mobile: mobile, Body: message, Retries: 0}
+	gosms.SendMessage(sms)
 
-	smsresp := SMSResponse{Status: 200, Message: "ok"}
+	smsresp := OutgoingSMSResponse{Status: 200, Message: "ok"}
 	var toWrite []byte
 	toWrite, err := json.Marshal(smsresp)
 	if err != nil {
@@ -85,14 +92,33 @@ func sendSMSHandler(w http.ResponseWriter, r *http.Request) {
 // dumps JSON data, used by log view. Methods allowed: GET
 func getLogsHandler(w http.ResponseWriter, r *http.Request) {
 	log.Println("--- getLogsHandler")
-	messages, _ := gosms.GetMessages("")
+	messages, _ := gosms.GetOutgoingMessages("")
 	summary, _ := gosms.GetStatusSummary()
 	dayCount, _ := gosms.GetLast7DaysMessageCount()
-	logs := SMSDataResponse{
+	logs := OutgoingSMSDataResponse{
 		Status:   200,
 		Message:  "ok",
 		Summary:  summary,
 		DayCount: dayCount,
+		Messages: messages,
+	}
+	var toWrite []byte
+	toWrite, err := json.Marshal(logs)
+	if err != nil {
+		log.Println(err)
+		//lets just depend on the server to raise 500
+	}
+	w.Header().Set("Content-type", "application/json")
+	w.Write(toWrite)
+}
+
+// dumps JSON data, used by log view. Methods allowed: GET
+func getIncomingHandler(w http.ResponseWriter, r *http.Request) {
+	log.Println("--- getIncomingHandler")
+	messages, _ := gosms.GetIncomingMessages("")
+	logs := IncomingSMSDataResponse{
+		Status:   200,
+		Message:  "ok",
 		Messages: messages,
 	}
 	var toWrite []byte
@@ -124,6 +150,7 @@ func InitServer(host string, port string, username string, password string) erro
 	// all API handlers
 	api := r.PathPrefix("/api").Subrouter()
 	api.Methods("GET").Path("/logs/").HandlerFunc(use(getLogsHandler, basicAuth))
+	api.Methods("GET").Path("/incoming/").HandlerFunc(use(getIncomingHandler, basicAuth))
 	api.Methods("POST").Path("/sms/").HandlerFunc(use(sendSMSHandler, basicAuth))
 
 	http.Handle("/", r)

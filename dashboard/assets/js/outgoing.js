@@ -7,7 +7,10 @@ $(function() {
     "iDisplayLength": 5,
     "bLengthChange": false,
     "oLanguage": { "sSearch": "" },
+    "order": [[ 0, "desc" ]],
     "columns": [
+        { "data": "id" },
+        { "data": "updated_at" },
         { "data": "mobile" },
         { "data": "body" },
         { "data": "status",
@@ -15,9 +18,7 @@ $(function() {
             return SMSStatus[data];
           },
           bUseRendered: false
-        },
-        { "data": "created_at" },
-        { "data": "updated_at" }
+        }
     ]
   });
   

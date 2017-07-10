@@ -35,6 +35,15 @@ func testConfig(appConfig ini.File) (bool, error) {
 		{"SETTINGS", "MSGTIMEOUT"},
 		{"SETTINGS", "MSGCOUNTOUT"},
 		{"SETTINGS", "MSGTIMEOUTLONG"},
+
+		{"SETTINGS", "SMTPENABLED"},
+		{"SETTINGS", "SMTPHOST"},
+		{"SETTINGS", "SMTPPORT"},
+		{"SETTINGS", "SMTPAUTH"},
+		{"SETTINGS", "SMTPUSERNAME"},
+		{"SETTINGS", "SMTPPASSWORD"},
+		{"SETTINGS", "SMTPSENDER"},
+		{"SETTINGS", "SMTPRECIPIENT"},
 	}
 
 	for _, c := range requiredFields {

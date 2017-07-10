@@ -1,10 +1,12 @@
 package gosms
 
 import (
-	"github.com/haxpax/gosms/modem"
 	"log"
-	"strings"
 	"time"
+	"math/rand"
+	"github.com/haxpax/gosms/modem"
+	"net/smtp"
+	"fmt"
 )
 
 //TODO: should be configurable
@@ -16,7 +18,8 @@ const (
 	SMSError            // 2
 )
 
-type SMS struct {
+type OutgoingSMS struct {
+	Id 	  int    `json:"id"`
 	UUID      string `json:"uuid"`
 	Mobile    string `json:"mobile"`
 	Body      string `json:"body"`
@@ -27,7 +30,38 @@ type SMS struct {
 	UpdatedAt string `json:"updated_at"`
 }
 
-var messages chan SMS
+type IncomingSMS struct {
+	Id 	  int    `json:"id"`
+	Mobile    string `json:"mobile"`
+	Body      string `json:"body"`
+	Device    string `json:"device"`
+	CreatedAt string `json:"created_at"`
+}
+
+
+type Device struct {
+	Driver *modem.Driver
+	Send   chan OutgoingSMS
+	Poll   chan bool
+}
+
+type SMTP struct {
+	Enabled    bool
+	Host 	   string
+	Port       int
+	Auth       bool
+	Username   string
+	Password   string
+	Sender     string
+	Recipient  string
+}
+
+var devices []*Device
+
+var queue chan OutgoingSMS
+var send chan OutgoingSMS
+var poll chan bool
+
 var wakeupMessageLoader chan bool
 
 var bufferMaxSize int
@@ -37,8 +71,10 @@ var timeOfLastWakeup time.Time
 var messageLoaderTimeout time.Duration
 var messageLoaderCountout int
 var messageLoaderLongTimeout time.Duration
+var smtpSettings *SMTP
 
-func InitWorker(modems []*modem.GSMModem, bufferSize, bufferLow, loaderTimeout, countOut, loaderLongTimeout int) {
+
+func InitWorker(drivers []*modem.Driver, bufferSize, bufferLow, loaderTimeout, countOut, loaderLongTimeout int, smtp *SMTP) {
 	log.Println("--- InitWorker")
 
 	bufferMaxSize = bufferSize
@@ -47,45 +83,95 @@ func InitWorker(modems []*modem.GSMModem, bufferSize, bufferLow, loaderTimeout, 
 	messageLoaderCountout = countOut
 	messageLoaderLongTimeout = time.Duration(loaderLongTimeout) * time.Minute
 
-	messages = make(chan SMS, bufferMaxSize)
 	wakeupMessageLoader = make(chan bool, 1)
 	wakeupMessageLoader <- true
 	messageCountSinceLastWakeup = 0
 	timeOfLastWakeup = time.Now().Add((time.Duration(loaderTimeout) * -1) * time.Minute) //older time handles the cold start state of the system
+	smtpSettings = smtp
 
-	// its important to init messages channel before starting modems because nil
-	// channel is non-blocking
+	// init global channels
+	queue = make(chan OutgoingSMS, bufferMaxSize)
+	send = make(chan OutgoingSMS, bufferMaxSize)
+	poll = make(chan bool, 1)
 
-	for i := 0; i < len(modems); i++ {
-		modem := modems[i]
-		err := modem.Connect()
+	// init all devices
+	for _, driver := range drivers {
+		err := driver.Connect()
 		if err != nil {
-			log.Println("InitWorker: error connecting", modem.DeviceId, err)
-			continue
+			log.Fatalln("InitWorker: error connecting", driver.DeviceId, err)
 		}
-		go processMessages(modem)
+
+		device := Device{
+			Driver: driver,
+			Send: make(chan OutgoingSMS, bufferMaxSize),
+			Poll: make(chan bool, 1),
+		};
+		devices = append(devices, &device)
+
+		go device.Worker()
 	}
-	go messageLoader(bufferMaxSize, bufferLowCount)
+
+	// init sms/poll listener
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		go func() {
+			for t := range ticker.C {
+				log.Println("Polling time", t)
+				poll <- true
+			}
+		}()
+
+		for {
+			select {
+			case message := <- send:
+				// we select random sending device
+				rand.Seed(time.Now().Unix())
+				n := rand.Int() % len(devices)
+				devices[n].Send <- message
+			case message := <- queue:
+				// select should work at random, so if queue will be full and we will have new request
+				// for send, it should pass through nearly realtime
+				rand.Seed(time.Now().Unix())
+				n := rand.Int() % len(devices)
+				devices[n].Send <- message
+			case <- poll:
+				// poll all devices
+				for _, device := range devices {
+					device.Poll <- true
+				}
+			}
+		}
+	}()
+
+	// load older messages
+	go messageLoader(bufferSize, bufferLowCount)
 }
 
-func EnqueueMessage(message *SMS, insertToDB bool) {
-	log.Println("--- EnqueueMessage: ", message)
-	if insertToDB {
-		insertMessage(message)
+
+func SendMessage(message *OutgoingSMS) {
+	log.Println("--- SendMessage", message)
+	err := insertOutgoingMessage(message);
+	if err != nil {
+		log.Fatalln("DB error: ", err)
 	}
-	//wakeup message loader and exit
-	go func() {
-		//notify the message loader only if its been to too long
-		//or too many messages since last notification
-		messageCountSinceLastWakeup++
-		if messageCountSinceLastWakeup > messageLoaderCountout || time.Now().Sub(timeOfLastWakeup) > messageLoaderTimeout {
-			log.Println("EnqueueMessage: ", "waking up message loader")
-			wakeupMessageLoader <- true
-			messageCountSinceLastWakeup = 0
-			timeOfLastWakeup = time.Now()
-		}
-		log.Println("EnqueueMessage - anon: count since last wakeup: ", messageCountSinceLastWakeup)
-	}()
+
+	// we try to send message immediately
+	send <- *message
+}
+
+func EnqueueMessage(message *OutgoingSMS) {
+	log.Println("--- EnqueueMessage: ", message)
+
+	//notify the message loader only if its been to too long
+	//or too many messages since last notification
+	messageCountSinceLastWakeup++
+	if messageCountSinceLastWakeup > messageLoaderCountout || time.Now().Sub(timeOfLastWakeup) > messageLoaderTimeout {
+		log.Println("EnqueueMessage: ", "waking up message loader")
+		wakeupMessageLoader <- true
+		messageCountSinceLastWakeup = 0
+		timeOfLastWakeup = time.Now()
+	}
+	log.Println("EnqueueMessage - anon: count since last wakeup: ", messageCountSinceLastWakeup)
 }
 
 func messageLoader(bufferSize, minFill int) {
@@ -111,53 +197,112 @@ func messageLoader(bufferSize, minFill int) {
 		case <-timeout:
 			log.Println("messageLoader: woken up by timeout")
 		}
-		if len(messages) >= bufferLowCount {
+		if len(queue) >= bufferLowCount {
 			//if we have sufficient number of messages to process,
 			//don't bother hitting the database
 			log.Println("messageLoader: ", "I have sufficient messages")
 			continue
 		}
 
-		countToFetch := bufferMaxSize - len(messages)
+		countToFetch := bufferMaxSize - len(queue)
 		log.Println("messageLoader: ", "I need to fetch more messages", countToFetch)
-		pendingMsgs, err := getPendingMessages(countToFetch)
+		pendingMsgs, err := getPendingOutgoingMessages(countToFetch)
 		if err == nil {
 			log.Println("messageLoader: ", len(pendingMsgs), " pending messages found")
 			for _, msg := range pendingMsgs {
-				messages <- msg
+				queue <- msg
 			}
 		}
 	}
 }
 
-func processMessages(modem *modem.GSMModem) {
-	defer func() {
-		log.Println("--- deferring ProcessMessage")
-	}()
-
-	//log.Println("--- ProcessMessage")
+func (d *Device) Worker() {
 	for {
-		message := <-messages
-		log.Println("processing: ", message.UUID, modem.DeviceId)
+		select {
+		case message := <- d.Send:
+			d.processMessage(message)
+		case <- d.Poll:
+			d.pollMessages()
+		}
+	}
+}
 
-		status := modem.SendSMS(message.Mobile, message.Body)
-		if strings.HasSuffix(status, "OK\r\n") {
-			message.Status = SMSProcessed
-		} else if strings.HasSuffix(status, "ERROR\r\n") {
-			message.Status = SMSError
-		} else {
-			message.Status = SMSPending
+func (d *Device) processMessage(message OutgoingSMS) {
+	log.Println("processing: ", message.UUID, d.Driver.DeviceId)
+	sent, err := d.Driver.SendSMS(message.Mobile, message.Body)
+
+	if sent == true {
+		message.Status = SMSProcessed
+	} else if err == nil {
+		message.Status = SMSPending
+	} else {
+		message.Status = SMSError
+	}
+
+	message.Device = d.Driver.DeviceId
+	message.Retries++
+
+	if err := updateOutgoingMessageStatus(message); err != nil {
+		log.Fatalln("DB error: ", err)
+	}
+
+	if message.Status != SMSProcessed && message.Retries < SMSRetryLimit {
+		// push message back to queue until either it is sent successfully or
+		// retry count is reached
+		// I can't push it to channel directly. Doing so may cause the sms to be in
+		// the queue twice. I don't want that
+		EnqueueMessage(&message)
+	}
+}
+
+func (d *Device) pollMessages() {
+	log.Println("polling: ", d.Driver.DeviceId)
+	for _, message := range *d.Driver.ReadSMS() {
+		sms := IncomingSMS{
+			Device: d.Driver.DeviceId,
+			Mobile: message[0],
+			Body: message[1],
 		}
-		message.Device = modem.DeviceId
-		message.Retries++
-		updateMessageStatus(message)
-		if message.Status != SMSProcessed && message.Retries < SMSRetryLimit {
-			// push message back to queue until either it is sent successfully or
-			// retry count is reached
-			// I can't push it to channel directly. Doing so may cause the sms to be in
-			// the queue twice. I don't want that
-			EnqueueMessage(&message, false)
+
+		if err := insertIncomingMessage(&sms); err != nil {
+			log.Fatalln("DB error: ", err)
 		}
-		time.Sleep(5 * time.Microsecond)
+
+		go incomingNotice(sms)
+	}
+}
+
+func incomingNotice(sms IncomingSMS) {
+	if smtpSettings.Enabled == false {
+		return
+	}
+
+	var auth smtp.Auth
+	if smtpSettings.Auth {
+		auth = smtp.PlainAuth(
+			smtpSettings.Sender,
+			smtpSettings.Username,
+			smtpSettings.Password,
+			smtpSettings.Host)
+	}
+
+	log.Println("Sending mail to", smtpSettings.Recipient,"via",fmt.Sprintf("%v:%d", smtpSettings.Host, smtpSettings.Port))
+	err := smtp.SendMail(
+		fmt.Sprintf("%v:%d", smtpSettings.Host, smtpSettings.Port),
+		auth,
+		smtpSettings.Sender,
+		[]string{smtpSettings.Recipient},
+		[]byte(fmt.Sprintf(
+			"To: %s\r\n" +
+			"Subject: SMS message from %s\r\n" +
+			"\r\n" +
+			"%s",
+			smtpSettings.Recipient,
+			sms.Mobile,
+			sms.Body,
+		)),
+	);
+	if err != nil {
+		log.Println("SMTP error: ", err)
 	}
 }

@@ -32,11 +32,35 @@ func main() {
 	serverusername, _ := appConfig.Get("SETTINGS", "USERNAME")
 	serverpassword, _ := appConfig.Get("SETTINGS", "PASSWORD")
 
+	smtpenabledraw, _ := appConfig.Get("SETTINGS", "SMTPENABLED")
+	smtphost, _ := appConfig.Get("SETTINGS", "SMTPHOST")
+	smtpportraw, _ := appConfig.Get("SETTINGS", "SMTPPORT")
+	smtpauthraw, _ := appConfig.Get("SETTINGS", "SMTPAUTH")
+	smtpusername, _ := appConfig.Get("SETTINGS", "SMTPUSERNAME")
+	smtppassword, _ := appConfig.Get("SETTINGS", "SMTPPASSWORD")
+	smtpsender, _ := appConfig.Get("SETTINGS", "SMTPSENDER")
+	smtprecipient, _ := appConfig.Get("SETTINGS", "SMTPRECIPIENT")
+
+	smtpenabled, _ := strconv.Atoi(smtpenabledraw)
+	smtpport, _ := strconv.Atoi(smtpportraw)
+	smtpauth, _ := strconv.Atoi(smtpauthraw)
+
+	smtp := gosms.SMTP{
+		Enabled: smtpenabled == 1,
+		Host: smtphost,
+		Port: smtpport,
+		Auth: smtpauth == 1,
+		Username: smtpusername,
+		Password: smtppassword,
+		Sender: smtpsender,
+		Recipient: smtprecipient,
+	}
+
 	_numDevices, _ := appConfig.Get("SETTINGS", "DEVICES")
 	numDevices, _ := strconv.Atoi(_numDevices)
 	log.Println("main: number of devices: ", numDevices)
 
-	var modems []*modem.GSMModem
+	var modems []*modem.Driver
 	for i := 0; i < numDevices; i++ {
 		dev := fmt.Sprintf("DEVICE%v", i)
 		_port, _ := appConfig.Get(dev, "COMPORT")
@@ -62,7 +86,7 @@ func main() {
 	loaderTimeoutLong, _ := strconv.Atoi(_loaderTimeoutLong)
 
 	log.Println("main: Initializing worker")
-	gosms.InitWorker(modems, bufferSize, bufferLow, loaderTimeout, loaderCountout, loaderTimeoutLong)
+	gosms.InitWorker(modems, bufferSize, bufferLow, loaderTimeout, loaderCountout, loaderTimeoutLong, &smtp)
 
 	log.Println("main: Initializing server")
 	err = InitServer(serverhost, serverport, serverusername, serverpassword)
