@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"regexp"
 	"strconv"
+	"unicode/utf16"
 )
 
 type Driver struct {
@@ -40,6 +41,7 @@ func (m *Driver) initModem() {
 	m.SendCommand("AT+CMEE=1\r\n", true) // useful error messages
 	m.SendCommand("AT+WIND=0\r\n", true) // disable notifications
 	m.SendCommand("AT+CMGF=1\r\n", true) // switch to TEXT mode
+	m.SendCommand("AT+CSCS=\"UCS2\"\r\n", true); // switch to ucs2 communication
 	m.SendCommand("AT+CPMS=\"MT\"\r\n", true) // read SMS messages from SIM and device memory
 }
 
@@ -105,6 +107,15 @@ func (m *Driver) SendCommand(command string, waitForOk bool) string {
 func (m *Driver) SendSMS(mobile string, message string) (sent bool, err error) {
 	log.Println("--- SendSMS ", mobile, message)
 
+	if IsASCII(message) {
+		m.SendCommand("AT+CSMP=17,167,0,0\r\n", true);
+	} else {
+		m.SendCommand("AT+CSMP=17,167,0,8\r\n", true);
+	}
+
+	mobile = ASCII2UCS2HEX(mobile)
+	message = ASCII2UCS2HEX(message)
+
 	m.Send("AT+CMGS=\""+mobile+"\"\r") // should return ">"
 	m.Read(3)
 
@@ -134,7 +145,7 @@ func (m *Driver) ReadSMS() (*[][]string) {
 	5. timestamp
 	6. message
 	 */
-	r := regexp.MustCompile(`\+CMGL: (\d+),"(ALL|REC READ|REC UNREAD)","([\d\+]+)",([^,]*),"([^"]+)"\r?\n(.*)\r?\n`);
+	r := regexp.MustCompile(`\+CMGL: (\d+),"(ALL|REC READ|REC UNREAD)","([0-9a-fA-F]+)",([^,]*),"([^"]+)"\r?\n([0-9a-fA-F]*)\r?\n`);
 
 	output := m.SendCommand("AT+CMGL=\"ALL\"\r\n", true);
 	matches := r.FindAllStringSubmatch(output, -1);
@@ -143,10 +154,10 @@ func (m *Driver) ReadSMS() (*[][]string) {
 	for _, match := range matches {
 
 		log.Println("---> incoming message", match[1])
-		log.Printf("     status: %v, originator: %s, name: %s, timestamp: %s\n", match[2], match[3], match[4], match[5])
-		log.Println("    ", match[6], "\n")
+		log.Printf("     status: %v, originator: %s, name: %s, timestamp: %s\n", match[2], UCS2HEX2ASCII(match[3]), UCS2HEX2ASCII(match[4]), match[5])
+		log.Println("    ", UCS2HEX2ASCII(match[6]), "\n")
 
-		messages = append(messages, []string{match[3], match[6]})
+		messages = append(messages, []string{UCS2HEX2ASCII(match[3]), UCS2HEX2ASCII(match[6])})
 
 		index, _ := strconv.Atoi(match[1]);
 		m.DeleteSMS(index)
@@ -169,4 +180,31 @@ func (m *Driver) log(messages... interface{}) {
 	}
 
 	log.Println(messages);
+}
+
+func ASCII2UCS2HEX(input string) string {
+	hex := fmt.Sprintf("%04x", utf16.Encode([]rune(input)))
+	return strings.Replace(hex[1:len(hex)-1], " ", "", -1)
+}
+
+func UCS2HEX2ASCII(input string) string {
+	output := ""
+	for i := 0; i*4 < len(input); i += 1 {
+		n, err := strconv.ParseInt(input[(i*4):(i*4+4)], 16, 32)
+		if err != nil {
+			log.Fatal(err)
+		}
+		output += string(n)
+	}
+
+	return output
+}
+
+func IsASCII(s string) bool {
+	for _, c := range s {
+		if c > 127 {
+			return false
+		}
+	}
+	return true
 }

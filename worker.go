@@ -7,6 +7,7 @@ import (
 	"github.com/haxpax/gosms/modem"
 	"net/smtp"
 	"fmt"
+	"encoding/base64"
 )
 
 //TODO: should be configurable
@@ -293,13 +294,17 @@ func incomingNotice(sms IncomingSMS) {
 		smtpSettings.Sender,
 		[]string{smtpSettings.Recipient},
 		[]byte(fmt.Sprintf(
+			"From: %s\r\n" +
 			"To: %s\r\n" +
+			"Content-Type: text/plain; charset=\"utf-8\"\r\n" +
+			"Content-Transfer-Encoding: base64\r\n" +
 			"Subject: SMS message from %s\r\n" +
 			"\r\n" +
 			"%s",
+			smtpSettings.Sender,
 			smtpSettings.Recipient,
 			sms.Mobile,
-			sms.Body,
+			base64.StdEncoding.EncodeToString([]byte(sms.Body)),
 		)),
 	);
 	if err != nil {
