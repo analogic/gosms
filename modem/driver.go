@@ -4,13 +4,14 @@ import (
 	"github.com/tarm/serial"
 	"log"
 	"strings"
-	"time"
 	"errors"
 	"fmt"
 	"bytes"
 	"regexp"
 	"strconv"
 	"unicode/utf16"
+	"math/rand"
+	"time"
 )
 
 type Driver struct {
@@ -26,7 +27,7 @@ func New(ComPort string, BaudRate int, DeviceId string) (modem *Driver) {
 }
 
 func (m *Driver) Connect() (err error) {
-	config := &serial.Config{Name: m.ComPort, Baud: m.BaudRate, ReadTimeout: 5*time.Second} // read timeout should not happen if modem will behave nicely
+	config := &serial.Config{Name: m.ComPort, Baud: m.BaudRate, ReadTimeout: time.Second * 5} // read timeout should not happen if modem will behave nicely
 	m.Port, err = serial.OpenPort(config)
 
 	if err == nil {
@@ -40,7 +41,7 @@ func (m *Driver) initModem() {
 	m.SendCommand("ATE0\r\n", true) // echo off
 	m.SendCommand("AT+CMEE=1\r\n", true) // useful error messages
 	m.SendCommand("AT+WIND=0\r\n", true) // disable notifications
-	m.SendCommand("AT+CMGF=1\r\n", true) // switch to TEXT mode
+	m.SendCommand("AT+CMGF=1\r\n", true) // switch to Text SMS Mode mode
 	m.SendCommand("AT+CSCS=\"UCS2\"\r\n", true); // switch to ucs2 communication
 	m.SendCommand("AT+CPMS=\"MT\"\r\n", true) // read SMS messages from SIM and device memory
 }
@@ -71,37 +72,21 @@ func (m *Driver) Expect(possibilities []string) (string, error) {
 
 func (m *Driver) Send(command string) {
 	m.log("--- Send:", command)
-	m.Port.Flush()
 	_, err := m.Port.Write([]byte(command))
 	if err != nil {
 		log.Fatal(err)
 	}
 }
 
-func (m *Driver) Read(n int) string {
-	var output string = "";
-	buf := make([]byte, n)
-	for i := 0; i < n; i++ {
-		// ignoring error as EOF raises error on Linux
-		c, _ := m.Port.Read(buf)
-		if c > 0 {
-			output = string(buf[:c])
-		}
-	}
-
-	m.log("--- Read(", n, "): ", output)
-	return output
-}
-
-func (m *Driver) SendCommand(command string, waitForOk bool) string {
+func (m *Driver) SendCommand(command string, waitForOk bool) (output string) {
 	m.Send(command)
 
 	if waitForOk {
-		output, _ := m.Expect([]string{"OK\r\n", "ERROR\r\n"}) // we will not change api so errors are ignored for now
-		return output
-	} else {
-		return m.Read(1)
+		output, _ = m.Expect([]string{"OK\r\n", "ERROR\r\n"}) // we will not change api so errors are ignored for now
+		time.Sleep(time.Millisecond * 100)
 	}
+
+	return output
 }
 
 func (m *Driver) SendSMS(mobile string, message string) (sent bool, err error) {
@@ -113,15 +98,29 @@ func (m *Driver) SendSMS(mobile string, message string) (sent bool, err error) {
 		m.SendCommand("AT+CSMP=17,167,0,8\r\n", true);
 	}
 
+	if IsASCII(message) && len(message) > 160 {
+		return m.sendConcatenatedSMS(mobile, message)
+	} else if IsASCII(message) != true && len(message) > 70 {
+		return m.sendConcatenatedSMS(mobile, message)
+	} else {
+		return m.sendSingleSMS(mobile, message)
+	}
+}
+
+func (m *Driver) sendSingleSMS(mobile string, message string) (sent bool, err error) {
 	mobile = ASCII2UCS2HEX(mobile)
 	message = ASCII2UCS2HEX(message)
 
 	m.Send("AT+CMGS=\""+mobile+"\"\r") // should return ">"
-	m.Read(3)
+
+	m.Expect([]string{">"})
+	time.Sleep(time.Millisecond * 100)
 
 	// EOM CTRL-Z = 26
 	m.Send(message+string(26));
+
 	output, err := m.Expect([]string{"OK\r\n", "ERROR\r\n"})
+	time.Sleep(time.Millisecond * 100)
 
 	if err != nil {
 		log.Println("Invalid response to send SMS:", output)
@@ -129,6 +128,44 @@ func (m *Driver) SendSMS(mobile string, message string) (sent bool, err error) {
 	}
 
 	if strings.HasSuffix(output, "OK\r\n") {
+		return true, nil
+	} else { // ERROR
+		return false, errors.New("ERROR")
+	}
+}
+
+func (m *Driver) sendConcatenatedSMS(mobile string, message string) (sent bool, err error) {
+	var messages *[]string
+	if IsASCII(message) {
+		messages = splitString(message, 153) // UDH len in septets = 7
+	} else {
+		messages = splitString(message, 67)
+	}
+
+	ref := rand.Int() % 255
+	total := len(*messages);
+
+	var status string
+	for i, message := range *messages {
+		// messagem, (153 char 7-bit / 67 char ucs2)
+
+		m.Send(fmt.Sprintf("AT^SCMS=%s,145,%d,%d,%d,%d\r", ASCII2UCS2HEX(mobile), i + 1, total, 8, ref))
+
+		m.Expect([]string{">"})
+		time.Sleep(time.Millisecond * 100)
+
+		m.Send(ASCII2UCS2HEX(message)+string(26));
+
+		status, err = m.Expect([]string{"OK\r\n", "ERROR\r\n"})
+		time.Sleep(time.Millisecond * 100)
+
+		if err != nil {
+			log.Println("Invalid response to send SMS:", status)
+			break
+		}
+	}
+
+	if strings.HasSuffix(status, "OK\r\n") {
 		return true, nil
 	} else { // ERROR
 		return false, errors.New("ERROR")
@@ -207,4 +244,23 @@ func IsASCII(s string) bool {
 		}
 	}
 	return true
+}
+
+func splitString(s string, n int) *[]string {
+	sub := ""
+	subs := []string{}
+
+	runes := bytes.Runes([]byte(s))
+	l := len(runes)
+	for i, r := range runes {
+		sub = sub + string(r)
+		if (i + 1) % n == 0 {
+			subs = append(subs, sub)
+			sub = ""
+		} else if (i + 1) == l {
+			subs = append(subs, sub)
+		}
+	}
+
+	return &subs
 }
